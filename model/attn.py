@@ -35,7 +35,6 @@ class GQFlashAttention(nn.Module):
             return k,v
         k = k.repeat_interleave(self.group_size,dim=1)
         v = v.repeat_interleave(self.group_size,dim=1)
-
         return k,v
     def forward(self,x: torch.Tensor):
         B, T, _ = x.shape
