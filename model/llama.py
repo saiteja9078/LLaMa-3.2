@@ -5,7 +5,7 @@ from model.attn import *
 from model.norm import RMSNorm
 import sentencepiece as spm
 
-class Model(nn.Module):
+class LLaMa(nn.Module):
     def __init__(
             self,
             pe_config,

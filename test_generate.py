@@ -1,6 +1,6 @@
 import torch
 from transformers import AutoTokenizer
-from model.llama import Model
+from model.llama import LLaMa
 
 # ── GPT-2 BPE tokenizer ──
 tokenizer = AutoTokenizer.from_pretrained("gpt2")
@@ -15,7 +15,7 @@ pe_config = {
     "original_max_position_embeddings": 8192,
 }
 
-model = Model(
+model = LLaMa(
     pe_config=pe_config,
     vocab_size=tokenizer.vocab_size,  # 50257
     d_model=512,
