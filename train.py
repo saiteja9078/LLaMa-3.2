@@ -43,7 +43,7 @@ def train(config):
         )
     
     train_dataset = FineWebDataset(seq_len=config["seq_len"])
-    train_loader = DataLoader(train_dataset, batch_size=config["batch_size"],prefetch_factor=4 if device == "cuda" else None
+    train_loader = DataLoader(train_dataset, batch_size=config["batch_size"],num_workers=4,prefetch_factor=4 if device == "cuda" else None
                               )
     data_iter = iter(train_loader)
 
@@ -67,8 +67,6 @@ def train(config):
     losses = []
     while step < config["max_steps"]:
         optimizer.zero_grad()
-        loss_acc = 0.
-
         #Gradient Accumulation
         for micro_step in range(config["grad_accum_steps"]):
             try:
@@ -128,6 +126,7 @@ def train(config):
         os.path.join(config["checkpoint_dir"], f"step_{step}_final.pt")
     )
     print(f"\nTraining complete! {tokens_seen:,} tokens processed in {step} steps.")
+    return losses
 
 
 if __name__ == "__main__":
@@ -155,4 +154,11 @@ if __name__ == "__main__":
         config["resume_from"] = args.continue_training
         config["continue_mode"] = True  # signal to reset step counter
 
-    train(config)
+    losses = train(config)
+    losses = {"loss":losses}
+    
+    os.makedirs("results", exist_ok=True)
+    with open("results/losses.json", "w") as f:
+        json.dump(losses, f)
+    print("Losses saved to results/losses.json")
+

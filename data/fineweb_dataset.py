@@ -14,18 +14,27 @@ class FineWebDataset(IterableDataset):
             split=split,
             streaming=True
         )
+
     def __iter__(self):
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is None:
+            iterator = self.dataset
+        else:
+            # Multi-process data loading
+            # Split the dataset into N parts (where N = num_workers)
+            # Each worker gets a unique part based on its worker_id
+            iterator = self.dataset.shard(
+                num_shards= worker_info.num_workers,
+                index=worker_info.id            )
         buffer = []
 
-        for doc in self.dataset:
-            #tokenize + append eos
+        for doc in iterator:
             tokens = self.tokenizer.encode(doc["text"]) + [self.tokenizer.eos_token_id]
             buffer.extend(tokens)
 
-            while len(buffer) >= self.seq_len+1:
+            while len(buffer) >= self.seq_len +1:
                 chunk = buffer[:self.seq_len+1]
                 buffer = buffer[self.seq_len+1:]
                 x = torch.tensor(chunk[:-1],dtype=torch.long)
                 y = torch.tensor(chunk[1:],dtype=torch.long)
-
                 yield x,y
