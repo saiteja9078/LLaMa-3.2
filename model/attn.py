@@ -1,13 +1,8 @@
 import torch
 import torch.nn as nn
-
 import torch.nn.functional as F
-try:
-    from flash_attn.flash_attn_interface import flash_attn_func
-    FLASH_AVAILABLE = True
-except Exception:
-    FLASH_AVAILABLE = False
-class GQFlashAttention(nn.Module):
+
+class GQAttention(nn.Module):
     def __init__(
             self,
             d_model: int,
@@ -62,10 +57,6 @@ class GQFlashAttention(nn.Module):
         k: (B, Tk, Hkv, Dh)
         v: (B, Tk, Hkv, Dh)
         """
-        if FLASH_AVAILABLE and q.is_cuda:
-            return flash_attn_func(
-                q,k,v,causal=is_causal
-            )
         k,v = self._expand_kv(
             k.transpose(1,2),v.transpose(1,2)
         )

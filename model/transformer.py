@@ -15,7 +15,7 @@ class Transformer(nn.Module):
     ):
         super().__init__()
         self.rms1 = RMSNorm(d_model)
-        self.attn = GQFlashAttention(
+        self.attn = GQAttention(
             d_model=d_model,
             num_q_heads=n_q_heads,
             num_kv_heads=n_kv_heads,

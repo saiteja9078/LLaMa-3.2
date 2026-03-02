@@ -4,17 +4,26 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 
 class FineWebDataset(IterableDataset):
-    def __init__(self,tokenizer=None,seq_len = 1024,split = "train",):
+    def __init__(self,tokenizer=None,seq_len = 1024,split = "train", data_path=None):
         super().__init__()
         self.seq_len = seq_len
         self.tokenizer  = AutoTokenizer.from_pretrained("gpt2") if tokenizer is None else tokenizer
-        self.dataset = load_dataset(
-            "HuggingFaceFW/fineweb-edu",
-            name="sample-10BT",
-            split=split,
-            streaming=True
-        )
-
+        if data_path:
+            # Load from local Arrow files
+            self.dataset = load_dataset(
+                "arrow",
+                data_files=f"{data_path}/*.arrow",
+                split="train",
+                streaming=True
+            )
+        else:
+            # Fallback to HF streaming
+            self.dataset = load_dataset(
+                "HuggingFaceFW/fineweb-edu",
+                name="sample-10BT",
+                split=split,
+                streaming=True
+            )
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is None:

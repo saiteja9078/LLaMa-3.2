@@ -1,22 +1,36 @@
-# from model.llama import LLaMa
+import os
+import time
+import json
+import logging
 import torch
 import torch.nn as nn
-import json
+from torch.utils.data import DataLoader
 from model.llama import LLaMa
 from train_utils.utils import *
 from data.fineweb_dataset import FineWebDataset
-from torch.utils.data import DataLoader
-import time
+
+# Suppress noisy tokenizer warnings about sequence length
+logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
+
 
 def train(config):
+
     if torch.cuda.is_available():
         device = "cuda"
     elif torch.backends.mps.is_available():
         device = "mps"
     else:
         device = "cpu"
-    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-    print("Using device:",device,"\nUsing Dtype:",dtype)
+
+    dtype = torch.bfloat16 if (device == "cuda" and torch.cuda.is_bf16_supported()) else torch.float16
+
+    print("Using device:", device)
+    print("Using dtype:", dtype)
+
+    # Enable TF32 for faster matmuls on Ampere+ GPUs
+    if device == "cuda":
+        torch.set_float32_matmul_precision("high")
+
     model = LLaMa(
         pe_config=config["pe_config"],
         vocab_size=config["vocab_size"],
@@ -27,138 +41,179 @@ def train(config):
         hidden_dim=config["hidden_dim"],
     ).to(device)
 
-    # Separate weight-decay vs no-decay params
+    # # Compile model for faster training (PyTorch 2.0+)
+    # if device == "cuda" and hasattr(torch, "compile"):
+    #     try:
+    #         model = torch.compile(model)
+    #         print("Model compiled with torch.compile")
+    #     except Exception as e:
+    #         print(f"torch.compile failed ({e}), continuing without compilation")
+
+    # Separate weight-decay vs no-decay params (biases & layernorms don't decay)
     decay_params = [p for n, p in model.named_parameters() if p.dim() >= 2]
     no_decay_params = [p for n, p in model.named_parameters() if p.dim() < 2]
-    optimizer = torch.optim.AdamW([
-        {"params": decay_params,    "weight_decay": config["weight_decay"]},
-        {"params": no_decay_params, "weight_decay": 0.0},
-    ], lr=config["learning_rate"], betas=(0.9, 0.95), fused=(device == "cuda"))
 
-    step,tokens_seen =0 ,0
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": decay_params, "weight_decay": config["weight_decay"]},
+            {"params": no_decay_params, "weight_decay": 0.0},
+        ],
+        lr=config["learning_rate"],
+        betas=(0.9, 0.95),
+        fused=(device == "cuda"),
+    )
 
-    if config["resume_from"]:
-        step,tokens_seen = load_checkpoint(
-            config["resume_from"],model,optimizer,device
+    step = 0
+    tokens_seen = 0
+
+    if config.get("resume_from"):
+        step, tokens_seen = load_checkpoint(
+            config["resume_from"], model, optimizer, device
         )
-    
-    train_dataset = FineWebDataset(seq_len=config["seq_len"])
-    train_loader = DataLoader(train_dataset, batch_size=config["batch_size"],num_workers=4,prefetch_factor=4 if device == "cuda" else None
-                              )
+
+    train_dataset = FineWebDataset(
+        seq_len=config["seq_len"],
+        data_path=config.get("data_path"),
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config["batch_size"],
+        num_workers=8,
+        pin_memory=(device == "cuda"),
+        persistent_workers=True,
+        drop_last=True,
+    )
+
     data_iter = iter(train_loader)
 
-    #If resuming skip the tokens already seen
-    if tokens_seen>0:
+    # If resuming, skip the tokens already seen
+    if tokens_seen > 0:
         seq_to_skip = tokens_seen // config["seq_len"]
-        print(f"Skipping {seq_to_skip} chunks to resume:")
-        for i,_ in enumerate(data_iter):
-            if i>=seq_to_skip:
+        print(f"Skipping {seq_to_skip} chunks to resume...")
+        for i, _ in enumerate(data_iter):
+            if i >= seq_to_skip:
                 break
-    
-    if device=="cuda" and hasattr(torch,"compile"):
-        model = torch.compile(model)
-        print("⚡ Model compiled with torch.compile")
 
-    
-    # Training Loop
     model.train()
-    os.makedirs(config["checkpoint_dir"],exist_ok=True)
-    t0 = time.time()
+    os.makedirs(config["checkpoint_dir"], exist_ok=True)
+
+    last_log_time = time.time()
     losses = []
+
+    print(f"Starting training from step {step} | target {config['max_steps']} steps")
+
     while step < config["max_steps"]:
-        optimizer.zero_grad()
-        #Gradient Accumulation
-        for micro_step in range(config["grad_accum_steps"]):
+
+        optimizer.zero_grad(set_to_none=True)
+        loss_accum = 0.0
+
+        for _ in range(config["grad_accum_steps"]):
             try:
-                x,y = next(data_iter)
-            except Exception:
+                x, y = next(data_iter)
+            except StopIteration:
                 data_iter = iter(train_loader)
-                x,y = next(data_iter)
+                x, y = next(data_iter)
 
-            x,y =x.to(device),y.to(device)
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
 
-            #Forward with mixed precision
-            # Some ops → low precision (fast)
-            # Sensitive ops → FP32 (stable)
-
-            with torch.autocast(device_type=device,dtype=dtype):
-                logits = model(x) #b ,t ,vocab
+            with torch.autocast(device_type=device, dtype=dtype):
+                logits = model(x)
                 loss = nn.functional.cross_entropy(
-                    logits.view(-1,logits.size(-1)) #b*t, vocab
-                    ,y.view(-1) #b*t
+                    logits.reshape(-1, logits.size(-1)),
+                    y.reshape(-1),
                 )
                 loss = loss / config["grad_accum_steps"]
+
             loss.backward()
-            loss_accum = loss.item()
-            losses.append(loss_accum)
-            tokens_seen = x.numel()
-        
+            loss_accum += loss.item()
+            tokens_seen += x.size(0) * x.size(1)
 
-        torch.nn.utils.clip_grad_norm_(model.parameters(),config["grad_clip"])
+        torch.nn.utils.clip_grad_norm_(model.parameters(), config["grad_clip"])
 
-        #update lr
-        lr = get_lr(step,config["warmup_steps"],config["max_steps"],config["learning_rate"],config["min_lr"])
-
+        # Update learning rate
+        lr = get_lr(
+            step,
+            config["warmup_steps"],
+            config["max_steps"],
+            config["learning_rate"],
+            config["min_lr"],
+        )
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
-        
-        optimizer.step()
-        step+=1
 
-        if step % 100 ==0 or step==1:
-            dt = time.time() - t0
-            tokens_per_sec = tokens_seen / dt if dt>0 else 0
-            print(
-                f"step {step:>6d} | "
-                f"loss {loss_accum:.4f} | "
-                f"lr {lr:.2e} | "
-                f"tokens {tokens_seen:>12,} | "
-                f"tok/s {tokens_per_sec:,.0f}"
-            )
-        
+        optimizer.step()
+        step += 1
+        losses.append(loss_accum)
+
+        # Measure per-step throughput
+        now = time.time()
+        step_time = now - last_log_time
+        last_log_time = now
+
+        step_tokens = (
+            config["batch_size"]
+            * config["seq_len"]
+            * config["grad_accum_steps"]
+        )
+        tokens_per_sec = step_tokens / step_time if step_time > 0 else 0
+
+        print(
+            f"step {step:>6d} | "
+            f"loss {loss_accum:.4f} | "
+            f"lr {lr:.2e} | "
+            f"tokens {tokens_seen:>12,} | "
+            f"tok/s {tokens_per_sec:,.0f}"
+        )
+
         if step % config["save_every"] == 0:
             save_checkpoint(
-                model,optimizer,step,tokens_seen,config,
-                os.path.join(config["checkpoint_dir"], f"step_{step}_.pt")
+                model, optimizer, step, tokens_seen, config,
+                os.path.join(config["checkpoint_dir"], f"step_{step}.pt"),
             )
+
     save_checkpoint(
         model, optimizer, step, tokens_seen, config,
-        os.path.join(config["checkpoint_dir"], f"step_{step}_final.pt")
+        os.path.join(config["checkpoint_dir"], f"step_{step}_final.pt"),
     )
+
     print(f"\nTraining complete! {tokens_seen:,} tokens processed in {step} steps.")
     return losses
 
 
 if __name__ == "__main__":
     import argparse
-    import json
+
     with open("train_utils/config.json") as f:
         config = json.load(f)
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
-    parser.add_argument("--continue_training", type=str, default=None,
-                        help="Path to checkpoint to continue training (reset step, keep weights)")
+    parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--continue_training", type=str, default=None)
     parser.add_argument("--max_steps", type=int, default=150_000)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--seq_len", type=int, default=1024)
+    parser.add_argument("--data_path", type=str, default=None)
     args = parser.parse_args()
 
-    # Update config
     config["max_steps"] = args.max_steps
     config["batch_size"] = args.batch_size
     config["seq_len"] = args.seq_len
+
+    if args.data_path:
+        config["data_path"] = args.data_path
 
     if args.resume:
         config["resume_from"] = args.resume
     elif args.continue_training:
         config["resume_from"] = args.continue_training
-        config["continue_mode"] = True  # signal to reset step counter
+        config["continue_mode"] = True
 
     losses = train(config)
-    losses = {"loss":losses}
-    
+
     os.makedirs("results", exist_ok=True)
     with open("results/losses.json", "w") as f:
-        json.dump(losses, f)
-    print("Losses saved to results/losses.json")
+        json.dump({"loss": losses}, f)
 
+    print("Losses saved to results/losses.json")
