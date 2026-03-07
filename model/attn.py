@@ -202,50 +202,44 @@ class ScaledRoPE(nn.Module):
         
         return torch.tensor(new_inv_freq, dtype=torch.float32)
     
-    def _build_cache(self, seq_len: int, device):
-        """Build cache of sin/cos values for positions 0 to seq_len-1"""
-        if self.cos_cached is not None and seq_len <= self.cos_cached.shape[0]:
-            if self.cos_cached.device == device:
-                return
-        
-        # Move inv_freq to correct device
-        inv_freq = self.inv_freq.to(device)
-        
-        # Create position indices (NO DIVISION by scale here!)
-        # The scaling is already baked into inv_freq
-        seq_idx = torch.arange(seq_len, device=device, dtype=torch.float32)
-        # Shape: (seq_len,)
-        
-        # Calculate angles: position × scaled_frequency
+    def _build_cache(self, seq_len: int, device, dtype):
+        if (
+            self.cos_cached is not None
+            and seq_len <= self.cos_cached.shape[1]
+            and self.cos_cached.device == device
+            and self.cos_cached.dtype == dtype
+        ):
+            return
+
+        inv_freq = self.inv_freq.to(device=device, dtype=dtype)
+
+        seq_idx = torch.arange(seq_len, device=device, dtype=dtype)
+
         idx_theta = seq_idx[:, None] * inv_freq[None, :]
-        # Shape: (seq_len, d/2)
-        
-        # Duplicate for interleaving
         idx_theta2 = torch.cat([idx_theta, idx_theta], dim=1)
-        # Shape: (seq_len, d)
+
+        self.cos_cached = idx_theta2.cos()[None, :, None, :]
+        self.sin_cached = idx_theta2.sin()[None, :, None, :]
+        def _neg_half(self, x_rope):
+            """Helper for rotation"""
+            d_by_2 = self.d // 2
+            return torch.cat([-x_rope[..., d_by_2:], x_rope[..., :d_by_2]], dim=-1)
+    def forward(self, x, offset: int = 0):
+        seq_len = x.shape[1] + offset
+        self._build_cache(seq_len, x.device, x.dtype)
+
+        T = x.shape[1]
+        x_rope, x_pass = x[..., :self.d], x[..., self.d:]
+        neg_half_x = self._neg_half(x_rope)
+
+        cos = self.cos_cached[:, offset:offset+T]
+        sin = self.sin_cached[:, offset:offset+T]
+
+        x_rope = (x_rope * cos) + (neg_half_x * sin)
+
+        return torch.cat([x_rope, x_pass], dim=-1)
         
-        # Compute and cache
-        self.cos_cached = idx_theta2.cos()[None, :, None, :]  # (1, seq_len, 1, d)
-        self.sin_cached = idx_theta2.sin()[None, :, None, :]  # (1, seq_len, 1, d)
-    
     def _neg_half(self, x_rope):
         """Helper for rotation"""
         d_by_2 = self.d // 2
         return torch.cat([-x_rope[..., d_by_2:], x_rope[..., :d_by_2]], dim=-1)
-    
-    def forward(self, x, offset: int = 0):
-        seq_len = x.shape[1] + offset
-        self._build_cache(seq_len, x.device)
-        
-        T = x.shape[1]
-        x_rope, x_pass = x[..., :self.d], x[..., self.d:]
-        neg_half_x = self._neg_half(x_rope)
-        
-        # Get cached values for current positions
-        cos = self.cos_cached[:, offset:offset+T]
-        sin = self.sin_cached[:, offset:offset+T]
-        
-        # Apply rotation
-        x_rope = (x_rope * cos) + (neg_half_x * sin)
-        
-        return torch.cat([x_rope, x_pass], dim=-1)
