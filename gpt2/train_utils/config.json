@@ -1,0 +1,18 @@
+{
+  "vocab_size": 50257,
+  "max_seq_len": 1024,
+  "d_model": 768,
+  "n_heads": 12,
+  "n_blocks": 12,
+  "batch_size": 8,
+  "grad_accum_steps": 8,
+  "max_steps": 150000,
+  "learning_rate": 0.0003,
+  "min_lr": 0.00003,
+  "warmup_steps": 2000,
+  "weight_decay": 0.1,
+  "grad_clip": 1.0,
+  "checkpoint_dir": "gpt2/checkpoints",
+  "save_every": 5000,
+  "resume_from": null
+}

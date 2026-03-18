@@ -220,10 +220,6 @@ class ScaledRoPE(nn.Module):
 
         self.cos_cached = idx_theta2.cos()[None, :, None, :]
         self.sin_cached = idx_theta2.sin()[None, :, None, :]
-        def _neg_half(self, x_rope):
-            """Helper for rotation"""
-            d_by_2 = self.d // 2
-            return torch.cat([-x_rope[..., d_by_2:], x_rope[..., :d_by_2]], dim=-1)
     def forward(self, x, offset: int = 0):
         seq_len = x.shape[1] + offset
         self._build_cache(seq_len, x.device, x.dtype)

@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import csv
 import logging
 import torch
 import torch.nn as nn
@@ -67,9 +68,14 @@ def train(config):
     tokens_seen = 0
 
     if config.get("resume_from"):
-        step, tokens_seen = load_checkpoint(
-            config["resume_from"], model, optimizer, device
-        )
+        if config.get("continue_mode"):
+            step, tokens_seen = load_checkpoint_for_continued_training(
+                config["resume_from"], model, optimizer, device
+            )
+        else:
+            step, tokens_seen = load_checkpoint(
+                config["resume_from"], model, optimizer, device
+            )
 
     train_dataset = FineWebDataset(
         seq_len=config["seq_len"],
@@ -97,6 +103,14 @@ def train(config):
 
     model.train()
     os.makedirs(config["checkpoint_dir"], exist_ok=True)
+
+    # ── CSV logger (buffered writes – negligible overhead) ──
+    os.makedirs("results", exist_ok=True)
+    csv_path = os.path.join("results", "training_log.csv")
+    csv_file = open(csv_path, "a", newline="")
+    csv_writer = csv.writer(csv_file)
+    if csv_file.tell() == 0:          # write header only for new files
+        csv_writer.writerow(["step", "loss", "lr", "tokens_seen", "tokens_per_sec", "step_time"])
 
     last_log_time = time.time()
     losses = []
@@ -167,6 +181,12 @@ def train(config):
             f"tok/s {tokens_per_sec:,.0f}"
         )
 
+        # Write row to CSV (flush every 100 steps to avoid I/O stalls)
+        csv_writer.writerow([step, f"{loss_accum:.6f}", f"{lr:.2e}", tokens_seen,
+                             f"{tokens_per_sec:.0f}", f"{step_time:.4f}"])
+        if step % 100 == 0:
+            csv_file.flush()
+
         if step % config["save_every"] == 0:
             save_checkpoint(
                 model, optimizer, step, tokens_seen, config,
@@ -178,6 +198,9 @@ def train(config):
         os.path.join(config["checkpoint_dir"], f"step_{step}_final.pt"),
     )
 
+    csv_file.flush()
+    csv_file.close()
+    print(f"Training log saved to {csv_path}")
     print(f"\nTraining complete! {tokens_seen:,} tokens processed in {step} steps.")
     return losses
 

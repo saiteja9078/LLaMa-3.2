@@ -1,13 +1,13 @@
 import torch
 from torch.utils.data import IterableDataset
 from datasets import load_dataset 
-from transformers import AutoTokenizer
+import tiktoken
 
 class FineWebDataset(IterableDataset):
     def __init__(self,tokenizer=None,seq_len = 1024,split = "train", data_path=None):
         super().__init__()
         self.seq_len = seq_len
-        self.tokenizer  = AutoTokenizer.from_pretrained("gpt2") if tokenizer is None else tokenizer
+        self.tokenizer = tiktoken.get_encoding("gpt2") if tokenizer is None else tokenizer
         if data_path:
             # Load from local Arrow files
             self.dataset = load_dataset(
@@ -38,7 +38,7 @@ class FineWebDataset(IterableDataset):
         buffer = []
 
         for doc in iterator:
-            tokens = self.tokenizer.encode(doc["text"]) + [self.tokenizer.eos_token_id]
+            tokens = self.tokenizer.encode_ordinary(doc["text"]) + [self.tokenizer.eot_token]
             buffer.extend(tokens)
 
             while len(buffer) >= self.seq_len +1:
